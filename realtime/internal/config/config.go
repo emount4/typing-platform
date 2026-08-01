@@ -1,14 +1,16 @@
 package config
 
 type Config struct {
-	Port string
-	Env  string
+	Port         string
+	Env          string
+	WSHubTimeout int
 }
 
 func NewConfig() (*Config, error) {
 	return &Config{
-		Port: ":8080",
-		Env:  "development",
+		Port:         ":8080",
+		Env:          "development",
+		WSHubTimeout: 60,
 	}, nil
 }
 
