@@ -1,23 +1,36 @@
 package config
 
+import (
+	"log"
+
+	"github.com/joho/godotenv"
+	"github.com/kelseyhightower/envconfig"
+)
+
 type Config struct {
-	Port         string
-	Env          string
-	WSHubTimeout int
+	Port         string `envconfig:"PORT" required:"true"`
+	Env          string `envconfig:"ENV" default:"development"`
+	WSHubTimeout int    `envconfig:"WSHUB_TIMEOUT" default:"5"`
+	Secret       string `envconfig:"SECRET" required:"true"`
 }
 
-func NewConfig() (*Config, error) {
-	return &Config{
-		Port:         ":8080",
-		Env:          "development",
-		WSHubTimeout: 60,
-	}, nil
-}
+func LoadConfig() (*Config, error) {
+	_ = godotenv.Load()
 
-func NewConfigMust() *Config {
-	config, err := NewConfig()
+	var cfg Config
+
+	err := envconfig.Process("", &cfg)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	return config
+
+	return &cfg, nil
+}
+
+func MustConfig() *Config {
+	cfg, err := LoadConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+	return cfg
 }

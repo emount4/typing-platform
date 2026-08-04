@@ -8,17 +8,19 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/emount4/typing-realtime/internal/auth"
 	"github.com/emount4/typing-realtime/internal/config"
 	"github.com/emount4/typing-realtime/internal/transport"
 )
 
 func main() {
-	cfg := config.NewConfigMust()
+	cfg := config.MustConfig()
 
-	router := transport.SetupRouter()
+	verifier := auth.NewJWTVerifier(cfg.Secret)
+	router := transport.SetupRouter(verifier)
 
 	srv := &http.Server{
-		Addr:         cfg.Port,
+		Addr:         ":" + cfg.Port, // Гарантируем формат ":8080"
 		Handler:      router,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
@@ -28,7 +30,7 @@ func main() {
 	go func() {
 		log.Printf("server starting on port %s", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("failed to start server %v", err)
+			log.Fatalf("failed to start server: %v", err)
 		}
 	}()
 
@@ -38,6 +40,7 @@ func main() {
 
 	log.Println("shutting down server...")
 
+	// Создаем контекст с таймаутом 5 секунд для корректного завершения
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
