@@ -1,24 +1,23 @@
 package transport
 
-import (
-	"github.com/emount4/typing-realtime/internal/handler"
-	"github.com/gin-gonic/gin"
-)
+import "github.com/gin-gonic/gin"
 
-func SetupRouter() *gin.Engine {
+func SetupRouter(verifier Verifier) *gin.Engine {
 	router := gin.Default()
 
-	healthHandler := handler.NewHealthHandler()
-	wsHandler := handler.NewWebSocketHandler()
+	healthHandler := NewHealthHandler()
+	wsHandler := NewWebSocketHandler(verifier)
 
 	api := router.Group("/api")
 	{
-		api.GET("/health", healthHandler.Health)
+		api.GET("/realtime_health", healthHandler.Health)
 	}
+
+	router.GET("/ws", wsHandler.HandleWS)
 
 	ws := router.Group("/ws")
 	{
-		ws.GET("/ws/", wsHandler.Echo)
+		ws.GET("/echo", wsHandler.Echo)
 	}
 	return router
 }
