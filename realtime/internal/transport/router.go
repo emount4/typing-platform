@@ -2,11 +2,11 @@ package transport
 
 import "github.com/gin-gonic/gin"
 
-func SetupRouter(verifier Verifier) *gin.Engine {
+func SetupRouter(verifier Verifier, client APIClient) *gin.Engine {
 	router := gin.Default()
 
 	healthHandler := NewHealthHandler()
-	wsHandler := NewWebSocketHandler(verifier)
+	wsHandler := NewWebSocketHandler(verifier, client)
 
 	api := router.Group("/api")
 	{

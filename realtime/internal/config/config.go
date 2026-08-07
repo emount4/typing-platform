@@ -12,6 +12,10 @@ type Config struct {
 	Env          string `envconfig:"ENV" default:"development"`
 	WSHubTimeout int    `envconfig:"WSHUB_TIMEOUT" default:"5"`
 	Secret       string `envconfig:"SECRET" required:"true"`
+
+	UseMockAPI    bool   `envconfig:"USE_MOCK_API" default:"true"`
+	APIBaseURL    string `envconfig:"API_BASE_URL" default:"http://api:8000"`
+	InternalToken string `envconfig:"INTERNAL_TOKEN" default:"dev_secret"`
 }
 
 func LoadConfig() (*Config, error) {

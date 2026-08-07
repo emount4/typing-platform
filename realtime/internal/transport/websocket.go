@@ -1,11 +1,13 @@
 package transport
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/emount4/typing-realtime/internal/apiclient"
 	"github.com/emount4/typing-realtime/internal/auth"
 	"github.com/emount4/typing-realtime/internal/session"
 	"github.com/gin-gonic/gin"
@@ -13,41 +15,41 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true // В продакшене настройте строже
-	},
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 type Verifier interface {
 	Verify(tokenString string) (*auth.JWTClaims, error)
 }
 
-type Sessions interface {
+// APIClient is the interface consumers in transport use to talk to Python API.
+type APIClient interface {
+	GetText(ctx context.Context, textID string) (*apiclient.TextResponse, error)
+	SubmitRun(ctx context.Context, run *apiclient.RunResult) error
 }
 
 type WebSocketHandler struct {
-	upgrader websocket.Upgrader
-	verifier Verifier
-	sessions map[string]*session.Session
+	upgrader  websocket.Upgrader
+	verifier  Verifier
+	sessions  map[string]*session.Session
+	apiClient APIClient
 }
 
-func NewWebSocketHandler(verifier Verifier) *WebSocketHandler {
+func NewWebSocketHandler(verifier Verifier, client APIClient) *WebSocketHandler {
 	return &WebSocketHandler{
 		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool {
-				return true // В проде настроить под свой домен (Caddy)
-			},
+			CheckOrigin:     func(r *http.Request) bool { return true },
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 		},
-		verifier: verifier,
-		sessions: make(map[string]*session.Session),
+		verifier:  verifier,
+		sessions:  make(map[string]*session.Session),
+		apiClient: client,
 	}
 }
 
 func (h *WebSocketHandler) Echo(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
-
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upgrade to WebSocket"})
 		return
@@ -56,11 +58,9 @@ func (h *WebSocketHandler) Echo(c *gin.Context) {
 
 	for {
 		messageType, message, err := conn.ReadMessage()
-
 		if err != nil {
 			break
 		}
-
 		if err := conn.WriteMessage(messageType, message); err != nil {
 			break
 		}
@@ -74,7 +74,7 @@ func (h *WebSocketHandler) HandleWS(c *gin.Context) {
 		return
 	}
 
-	// 1. Ждем auth-кадр с таймаутом 5 секунд (п. 4.3 доки)
+	// expect auth frame within 5s
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, message, err := conn.ReadMessage()
 	if err != nil {
@@ -82,9 +82,8 @@ func (h *WebSocketHandler) HandleWS(c *gin.Context) {
 		conn.Close()
 		return
 	}
-	conn.SetReadDeadline(time.Time{}) // Сбрасываем дедлайн
+	conn.SetReadDeadline(time.Time{})
 
-	// 2. Парсим auth
 	var authMsg AuthMessage
 	var userID int64
 	var isAnon bool
@@ -104,8 +103,8 @@ func (h *WebSocketHandler) HandleWS(c *gin.Context) {
 		isAnon = true
 	}
 
-	// 3. Создаем сессию и запускаем pumps
-	sess := session.NewSession(conn, userID, isAnon)
+	validator := session.NewValidaator()
+	sess := session.NewSession(conn, userID, isAnon, validator)
 	h.sessions[sess.ID] = sess
 
 	log.Printf("session created: %s, user: %d, anon: %v", sess.ID, userID, isAnon)
@@ -117,30 +116,70 @@ func (h *WebSocketHandler) HandleWS(c *gin.Context) {
 func (h *WebSocketHandler) messageHandler(sess *session.Session, msg map[string]interface{}) {
 	msgType, ok := msg["type"].(string)
 	if !ok {
-		log.Printf("⚠️ Сообщение без type: %v", msg)
+		log.Printf("message without type: %v", msg)
 		return
 	}
 
-	log.Printf("📨 Получено сообщение type=%s от сессии %s", msgType, sess.ID)
-
 	switch msgType {
 	case "auth":
-		// auth уже обработан при подключении, сюда не должно приходить
-		log.Printf("⚠️ Повторный auth от сессии %s", sess.ID)
+		log.Printf("unexpected auth from session %s", sess.ID)
 
 	case "session.start":
-		log.Printf(" session.start: text_id=%v", msg["text_id"])
-		// TODO: логика начала забега
+		textID, ok := msg["text_id"].(string)
+		if !ok {
+			return
+		}
+		text, err := h.apiClient.GetText(context.Background(), textID)
+		if err != nil {
+			log.Printf("failed to get text %s: %v", textID, err)
+			return
+		}
+		sess.StartSession(textID, text.Content)
+		response := map[string]interface{}{"type": "session.started", "text_length": len(sess.TextRunes)}
+		data, _ := json.Marshal(response)
+		sess.Send <- data
 
 	case "keystroke":
-		log.Printf("⌨️ keystroke: char=%v, timestamp=%v", msg["char"], msg["timestamp"])
-		// TODO: валидация и обработка нажатия
+		char, ok := msg["char"].(string)
+		if !ok {
+			return
+		}
+		timestampF, ok := msg["timestamp"].(float64)
+		if !ok {
+			return
+		}
+		timestamp := int64(timestampF)
+
+		res := sess.Validator.ValidateKS(sess, char, timestamp)
+		if !res.IsValid {
+			log.Printf("invalid keystroke: %s", res.Reason)
+			return
+		}
+
+		progress, err := sess.ProcessKeystroke(char, timestamp)
+		if err != nil {
+			log.Printf("process keystroke error: %v", err)
+			return
+		}
+		data, _ := json.Marshal(progress)
+		sess.Send <- data
 
 	case "session.finish":
-		log.Printf(" session.finish")
-		// TODO: подсчет результатов
+		payload, run := sess.FinishSession()
+		data, _ := json.Marshal(payload)
+		sess.Send <- data
+
+		go func(r *apiclient.RunResult, s *session.Session) {
+			if h.apiClient != nil {
+				if err := h.apiClient.SubmitRun(context.Background(), r); err != nil {
+					log.Printf("failed to submit run: %v", err)
+				}
+			}
+			s.Close()
+			delete(h.sessions, s.ID)
+		}(run, sess)
 
 	default:
-		log.Printf(" Неизвестный тип сообщения: %s", msgType)
+		log.Printf("unknown message type: %s", msgType)
 	}
 }
