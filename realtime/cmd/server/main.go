@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/emount4/typing-realtime/internal/apiclient"
 	"github.com/emount4/typing-realtime/internal/auth"
 	"github.com/emount4/typing-realtime/internal/config"
 	"github.com/emount4/typing-realtime/internal/transport"
@@ -17,7 +18,18 @@ func main() {
 	cfg := config.MustConfig()
 
 	verifier := auth.NewJWTVerifier(cfg.Secret)
-	router := transport.SetupRouter(verifier)
+
+	var apiClient transport.APIClient
+
+	if cfg.UseMockAPI {
+		log.Println("🔧 Используем MOCK API клиент")
+		apiClient = apiclient.NewMockAPIClient()
+	} else {
+		log.Printf("🌐 Используем реальный API: %s", cfg.APIBaseURL)
+		apiClient = apiclient.NewApiClient(cfg.APIBaseURL, cfg.InternalToken)
+	}
+
+	router := transport.SetupRouter(verifier, apiClient)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port, // Гарантируем формат ":8080"
