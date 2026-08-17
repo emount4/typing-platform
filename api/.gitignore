@@ -1,0 +1,15 @@
+# Секреты
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Кэши инструментов
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
