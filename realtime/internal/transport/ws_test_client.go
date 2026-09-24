@@ -16,19 +16,16 @@ func main() {
 	defer conn.Close()
 
 	// отправляем auth первым сообщением
-	auth := `{"type":"auth","token":"<ACCESS_TOKEN>"}`
+	auth := `{"type":"auth","v":1,"token":"<ACCESS_TOKEN>","anon_id":null}`
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(auth)); err != nil {
 		log.Fatal(err)
 	}
 
-	// отправляем несколько keystroke
-	for i := 0; i < 5; i++ {
-		msg := fmt.Sprintf(`{"type":"keystroke","char":"a","t":%d}`, i*100)
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
-			log.Fatal(err)
-		}
-		time.Sleep(100 * time.Millisecond)
+	msg := fmt.Sprintf(`{"type":"keystroke.batch","seq":0,"items":[{"char":"a","t":0},{"char":"b","t":100},{"char":"c","t":200}]}`)
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+		log.Fatal(err)
 	}
+	time.Sleep(100 * time.Millisecond)
 
 	// читаем ответы 1s
 	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
