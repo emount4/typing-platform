@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -22,14 +23,34 @@ type TextResponse struct {
 }
 
 type RunResult struct {
-	UserID          int64   `json:"user_id"`
-	TextID          string  `json:"text_id"`
-	WPM             float64 `json:"wpm"`
-	Accuracy        float64 `json:"accuracy"`
-	DurationMs      int64   `json:"duration_ms"`
-	TotalKeystrokes int     `json:"total_keystrokes"`
-	Errors          int     `json:"errors"`
-	IsPersonalBest  bool    `json:"is_personal_best"`
+	SessionID  string         `json:"session_id"`
+	UserID     *int64         `json:"user_id"`
+	AnonID     *string        `json:"anon_id"`
+	TextID     string         `json:"text_id"`
+	Mode       string         `json:"mode"`
+	StartedAt  time.Time      `json:"started_at"`
+	DurationMs int64          `json:"duration_ms"`
+	WPMNet     float64        `json:"wpm_net"`
+	WPMRaw     float64        `json:"wpm_raw"`
+	Accuracy   float64        `json:"accuracy"`
+	Typed      int            `json:"typed"`
+	Correct    int            `json:"correct"`
+	Errors     int            `json:"errors"`
+	Flags      []string       `json:"flags"`
+	Keystrokes []RunKeystroke `json:"keystrokes"`
+}
+
+type RunKeystroke struct {
+	Char    string `json:"char"`
+	T       int64  `json:"t"`
+	IsError bool   `json:"is_error"`
+}
+
+type RunSubmitResult struct {
+	RunID          string   `json:"run_id"`
+	IsPersonalBest bool     `json:"is_personal_best"`
+	Flagged        bool     `json:"flagged"`
+	RatingDelta    *float64 `json:"rating_delta"`
 }
 
 func NewApiClient(baseURL, token string) *ApiClient {
@@ -70,19 +91,19 @@ func (c *ApiClient) GetText(ctx context.Context, textID string) (*TextResponse, 
 	return &text, nil
 }
 
-func (c *ApiClient) SubmitRun(ctx context.Context, run *RunResult) error {
+func (c *ApiClient) SubmitRun(ctx context.Context, run *RunResult) (*RunSubmitResult, error) {
 	url := fmt.Sprintf("%s/internal/runs", c.baseURL)
 
-	body, err := json.Marshal(run)
+	bodyBytes, err := json.Marshal(run)
 	if err != nil {
-		return fmt.Errorf("failed to marshal run: %w", err)
+		return nil, fmt.Errorf("failed to marshal run: %w", err)
 	}
 
-	bodyReader := bytes.NewReader(body)
+	bodyReader := bytes.NewReader(bodyBytes)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bodyReader)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("X-Internal-Token", c.token)
@@ -90,13 +111,24 @@ func (c *ApiClient) SubmitRun(ctx context.Context, run *RunResult) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("API returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
 	}
 
-	return nil
+	result := &RunSubmitResult{}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read run submission response: %w", err)
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, result); err != nil {
+			return nil, fmt.Errorf("failed to decode run submission response: %w", err)
+		}
+	}
+
+	return result, nil
 }

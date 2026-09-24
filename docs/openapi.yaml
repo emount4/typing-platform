@@ -1,0 +1,711 @@
+openapi: 3.1.0
+
+info:
+  title: Typing Platform API
+  version: 1.0.0-draft
+  description: |
+    REST-контракт Python-сервиса. Всё, что доступно браузеру.
+
+    Что сюда НЕ входит:
+      * `/internal/*` — Go → Python, см. `contracts/internal.md`. Наружу не выставляется,
+        Caddy про этот путь не знает.
+      * `/ws` — WebSocket, см. `contracts/websocket.md`. Обслуживается Go.
+
+    Статус каждого пути помечен расширением `x-stage`:
+      * `fixed`  — реализовано или реализуется, менять через PR с ревью
+      * `agreed` — форма согласована, кода нет, писать можно
+      * `draft`  — эскиз на будущий этап, поля изменятся
+
+    Единицы и соглашения:
+      * все идентификаторы сущностей — UUID v4 строкой, кроме `user_id` (int64)
+      * все временные метки — ISO 8601 в UTC с суффиксом `Z`
+      * `snake_case` во всех полях
+      * тексты нормализованы в NFC
+
+  contact:
+    name: Матвей (API, фронтенд) · Егор (realtime, инфраструктура)
+
+servers:
+  - url: https://{domain}/api/v1
+    description: Продакшен
+    variables:
+      domain:
+        default: example.com
+  - url: http://localhost:8000/api/v1
+    description: Локальная разработка
+
+tags:
+  - name: system
+    description: Живость сервиса. Этап 1.
+  - name: texts
+    description: Корпус текстов. Этап 2.
+  - name: auth
+    description: Регистрация и сессии. Этап 3.
+  - name: me
+    description: Профиль и личная статистика. Этап 3.
+  - name: leaderboard
+    description: Лидерборды. Этап 3.
+  - name: rooms
+    description: Комнаты для гонок. Этап 4.
+  - name: lessons
+    description: Учебный режим. Этап 6.
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  # ─────────────────────────────────────────── этап 1
+
+  /ping:
+    get:
+      tags: [system]
+      summary: Проверка связи фронтенд → Python
+      description: |
+        Единственное назначение — кнопка «пинг» на странице-заглушке этапа 1.
+        Из продакшена не убирать: это самая дешёвая проверка, что Caddy разводит
+        пути правильно.
+      operationId: ping
+      security: []
+      x-stage: fixed
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message, service, version]
+                properties:
+                  message: { type: string, example: pong }
+                  service: { type: string, example: typing-api }
+                  version: { type: string, example: "0.1.0" }
+
+  # ─────────────────────────────────────────── этап 2
+
+  /texts/random:
+    get:
+      tags: [texts]
+      summary: Случайный текст для забега
+      description: |
+        Клиент получает текст, показывает его пользователю и передаёт в Go
+        **только `id`** — эталон Go забирает у Python сам, см. `websocket.md` §3.1.
+      operationId: getRandomText
+      security: []
+      x-stage: fixed
+      parameters:
+        - name: lang
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/Lang" }
+        - name: mode
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [solo, race]
+            default: solo
+        - name: min_length
+          in: query
+          required: false
+          schema: { type: integer, minimum: 20, default: 150 }
+        - name: max_length
+          in: query
+          required: false
+          schema: { type: integer, maximum: 5000, default: 400 }
+        - name: exclude_id
+          in: query
+          required: false
+          description: Не выдавать этот текст. Чтобы «ещё раз» не вернуло то же самое.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Текст
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Text" }
+        "404":
+          description: Под фильтры ничего не подошло
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /texts/{text_id}:
+    get:
+      tags: [texts]
+      summary: Текст по идентификатору
+      description: Нужен для реплеев и для повторного забега по ссылке.
+      operationId: getText
+      security: []
+      x-stage: agreed
+      parameters:
+        - name: text_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Текст
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Text" }
+        "404":
+          description: Нет такого
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  # ─────────────────────────────────────────── этап 3
+
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: Регистрация
+      operationId: register
+      security: []
+      x-stage: agreed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [login, password]
+              properties:
+                login:
+                  type: string
+                  minLength: 3
+                  maxLength: 32
+                  pattern: "^[a-zA-Z0-9_-]+$"
+                password:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                anon_id:
+                  type: string
+                  format: uuid
+                  description: |
+                    Если передан — забеги этого браузера привязываются к новому аккаунту.
+                    Решение о привязке принимается на этапе 3; поле заведено заранее,
+                    иначе привязывать будет нечего.
+      responses:
+        "201":
+          description: Аккаунт создан, сессия открыта
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "409":
+          description: Логин занят
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Не прошло валидацию
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Вход
+      operationId: login
+      security: []
+      x-stage: agreed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [login, password]
+              properties:
+                login: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Сессия открыта
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "401":
+          description: |
+            Неверный логин или пароль. Формулировка ответа одна на оба случая —
+            иначе эндпоинт превращается в проверялку существующих логинов.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Обновить access-токен
+      description: |
+        Refresh-токен читается из httpOnly-cookie, а не из тела: тело доступно
+        JavaScript, cookie — нет.
+      operationId: refresh
+      security: []
+      x-stage: agreed
+      responses:
+        "200":
+          description: Новая пара
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "401":
+          description: Refresh протух или отозван
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Выход
+      description: Отзывает refresh-токен в базе и чистит cookie.
+      operationId: logout
+      x-stage: agreed
+      responses:
+        "204": { description: Вышли }
+
+  /me:
+    get:
+      tags: [me]
+      summary: Профиль текущего пользователя
+      operationId: getMe
+      x-stage: agreed
+      responses:
+        "200":
+          description: Профиль
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401":
+          description: Нет или протух токен
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /me/runs:
+    get:
+      tags: [me]
+      summary: История забегов
+      operationId: getMyRuns
+      x-stage: agreed
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          description: |
+            Курсорная пагинация, а не offset. При offset новый забег во время листания
+            сдвигает страницу и пользователь видит одну и ту же запись дважды.
+          schema: { type: string }
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [solo, race, lesson]
+      responses:
+        "200":
+          description: Страница истории
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Run" }
+                  next_cursor:
+                    type: [string, "null"]
+
+  /me/stats:
+    get:
+      tags: [me]
+      summary: Сводная статистика
+      description: |
+        То, из чего строятся график прогресса, тепловая карта клавиатуры и — с этапа 6 —
+        персональные упражнения под слабые связки.
+      operationId: getMyStats
+      x-stage: agreed
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 30d, all]
+            default: 30d
+      responses:
+        "200":
+          description: Статистика
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserStats" }
+
+  /leaderboard:
+    get:
+      tags: [leaderboard]
+      summary: Топ-100
+      description: |
+        Кэш в Redis, TTL порядка минуты. Забеги с непустым `flags` сюда не попадают —
+        см. `internal.md` §3.3.
+      operationId: getLeaderboard
+      security: []
+      x-stage: agreed
+      parameters:
+        - name: metric
+          in: query
+          description: |
+            `best_wpm` — по личным рекордам, `rating` — по рейтингу (этап 5).
+            Это два разных лидерборда, а не сортировка одного.
+          schema:
+            type: string
+            enum: [best_wpm, rating]
+            default: best_wpm
+        - name: lang
+          in: query
+          schema: { $ref: "#/components/schemas/Lang" }
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [7d, 30d, all]
+            default: all
+      responses:
+        "200":
+          description: Таблица
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, updated_at]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/LeaderboardEntry" }
+                  updated_at:
+                    type: string
+                    format: date-time
+                    description: Момент построения кэша. Чтобы фронтенд не врал про «сейчас».
+
+  # ─────────────────────────────────────────── этап 4
+
+  /rooms:
+    post:
+      tags: [rooms]
+      summary: Создать комнату
+      description: |
+        ЭСКИЗ. Текст для заезда выбирает Python и кладёт параметры комнаты в Redis
+        под ключом `room:{code}` — Go читает их оттуда. Это единственное место, где
+        Python пишет, а Go читает; см. `internal.md` §5.
+      operationId: createRoom
+      x-stage: draft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lang: { $ref: "#/components/schemas/Lang" }
+                max_participants: { type: integer, minimum: 2, maximum: 10, default: 5 }
+                text_id:
+                  type: string
+                  format: uuid
+                  description: Если не передан — выбирается случайно.
+      responses:
+        "201":
+          description: Комната создана
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Room" }
+
+  /rooms/{code}:
+    get:
+      tags: [rooms]
+      summary: Параметры комнаты по коду
+      description: |
+        ЭСКИЗ. Нужен, чтобы страница по ссылке-приглашению могла показать текст и
+        участников **до** подключения по WebSocket.
+      operationId: getRoom
+      security: []
+      x-stage: draft
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[A-Z0-9]{6}$" }
+      responses:
+        "200":
+          description: Комната
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Room" }
+        "404":
+          description: Нет или протухла
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  # ─────────────────────────────────────────── этап 6
+
+  /lessons:
+    get:
+      tags: [lessons]
+      summary: Карта курса с прогрессом
+      description: |
+        ЭСКИЗ. Структура курса лежит в конфигурационном файле, а не в коде: методику
+        придётся править по живым пользователям, и пересборка сервиса ради этого —
+        лишний шаг.
+      operationId: getLessons
+      x-stage: draft
+      responses:
+        "200":
+          description: Уроки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Lesson" }
+
+  /lessons/{lesson_id}/exercise:
+    get:
+      tags: [lessons]
+      summary: Текст упражнения
+      description: |
+        ЭСКИЗ. Python ходит в Go-генератор (`generator.md`) и отдаёт результат клиенту.
+        Возвращается `text_id`, потому что дальше забег идёт по общему пути через
+        `session.start` — учебный режим не заводит своего протокола.
+      operationId: getExercise
+      x-stage: draft
+      parameters:
+        - name: lesson_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: personalized
+          in: query
+          description: |
+            Собрать упражнение под топ проблемных связок пользователя вместо
+            стандартного текста урока. Ради этого и копится статистика с этапа 2.
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Упражнение
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  text_id: { type: string, format: uuid }
+                  content: { type: string }
+                  alphabet:
+                    type: array
+                    items: { type: string }
+                    description: Разрешённые символы. Ни одного, которому не учили.
+                  target_bigrams:
+                    type: array
+                    items: { type: string }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Access-токен в заголовке `Authorization: Bearer <token>`.
+        Хранится в памяти вкладки, не в localStorage. Refresh — только в httpOnly-cookie.
+        Claim'ы описаны в `websocket.md` §2.3: секрет общий с Go.
+
+  schemas:
+
+    Lang:
+      type: string
+      enum: [ru, en]
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: |
+            Машиночитаемый код. Логика фронтенда строится только на нём.
+          examples: [text_not_found, login_taken, invalid_credentials]
+        message:
+          type: string
+          description: Для человека и логов. Разбирать кодом нельзя.
+        details:
+          type: object
+          additionalProperties: true
+
+    Text:
+      type: object
+      required: [id, content, lang, length]
+      properties:
+        id: { type: string, format: uuid }
+        content:
+          type: string
+          description: Нормализован в NFC. См. `internal.md` §2 — почему это важно.
+        lang: { $ref: "#/components/schemas/Lang" }
+        length:
+          type: integer
+          description: Длина в графемах, не в байтах.
+        source: { type: string }
+        title: { type: [string, "null"] }
+
+    TokenPair:
+      type: object
+      required: [access_token, expires_in, user]
+      properties:
+        access_token: { type: string }
+        expires_in:
+          type: integer
+          description: Секунды. Ориентир — 900.
+        token_type: { type: string, const: bearer }
+        user: { $ref: "#/components/schemas/User" }
+      description: |
+        Refresh-токена в теле нет намеренно — он уходит в httpOnly-cookie заголовком
+        `Set-Cookie`.
+
+    User:
+      type: object
+      required: [id, login, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        login: { type: string }
+        created_at: { type: string, format: date-time }
+        best_wpm: { type: [number, "null"] }
+        total_runs: { type: integer }
+        rating: { type: [number, "null"] }
+
+    Run:
+      type: object
+      required: [id, text_id, mode, wpm_net, accuracy, duration_ms, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        text_id: { type: string, format: uuid }
+        mode:
+          type: string
+          enum: [solo, race, lesson]
+        lang: { $ref: "#/components/schemas/Lang" }
+        wpm_net: { type: number }
+        wpm_raw: { type: number }
+        accuracy: { type: number }
+        duration_ms: { type: integer }
+        typed: { type: integer }
+        correct: { type: integer }
+        errors: { type: integer }
+        is_personal_best: { type: boolean }
+        flagged:
+          type: boolean
+          description: |
+            Забег помечен как подозрительный. В лидерборды не попадает, владельцу виден —
+            вместе с понятным объяснением, а не молча.
+        flag_reasons:
+          type: array
+          items: { type: string }
+        created_at: { type: string, format: date-time }
+
+    UserStats:
+      type: object
+      properties:
+        best_wpm: { type: number }
+        avg_wpm_7d: { type: [number, "null"] }
+        avg_wpm_30d: { type: [number, "null"] }
+        avg_accuracy_30d: { type: [number, "null"] }
+        total_runs: { type: integer }
+        daily:
+          type: array
+          description: Точки для графика прогресса.
+          items:
+            type: object
+            properties:
+              date: { type: string, format: date }
+              runs: { type: integer }
+              avg_wpm: { type: number }
+              avg_accuracy: { type: number }
+        key_stats:
+          type: array
+          description: Тепловая карта клавиатуры.
+          items:
+            type: object
+            properties:
+              char: { type: string }
+              attempts: { type: integer }
+              errors: { type: integer }
+              error_rate: { type: number }
+              avg_interval_ms: { type: number }
+        problem_bigrams:
+          type: array
+          description: |
+            Топ проблемных связок. Вход для персональных упражнений этапа 6 —
+            то, ради чего статистика собирается с этапа 2.
+          items:
+            type: object
+            properties:
+              bigram: { type: string }
+              attempts: { type: integer }
+              error_rate: { type: number }
+              avg_interval_ms: { type: number }
+
+    LeaderboardEntry:
+      type: object
+      properties:
+        rank: { type: integer }
+        user_id: { type: integer, format: int64 }
+        login: { type: string }
+        value: { type: number }
+        accuracy: { type: number }
+        achieved_at: { type: string, format: date-time }
+
+    Room:
+      type: object
+      description: ЭСКИЗ, этап 4.
+      properties:
+        code: { type: string }
+        invite_url: { type: string, format: uri }
+        text_id: { type: string, format: uuid }
+        lang: { $ref: "#/components/schemas/Lang" }
+        max_participants: { type: integer }
+        status:
+          type: string
+          enum: [waiting, countdown, running, finished]
+        created_by: { type: integer, format: int64 }
+        expires_at: { type: string, format: date-time }
+
+    Lesson:
+      type: object
+      description: ЭСКИЗ, этап 6.
+      properties:
+        id: { type: string }
+        order: { type: integer }
+        title: { type: string }
+        alphabet:
+          type: array
+          items: { type: string }
+        unlocked:
+          type: boolean
+          description: Замок на непройденных уроках.
+        status:
+          type: string
+          enum: [locked, available, in_progress, passed]
+        attempts: { type: integer }
+        criteria:
+          type: object
+          description: |
+            Ориентир для старта — 97% точности при 25 WPM в трёх подходах подряд.
+            Числа подбираются по факту на живых пользователях, поэтому приезжают
+            с сервера, а не зашиты во фронтенде.
+          properties:
+            min_accuracy: { type: number }
+            min_wpm: { type: number }
+            consecutive: { type: integer }

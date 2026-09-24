@@ -20,8 +20,12 @@ func (m *MockAPIClient) GetText(ctx context.Context, textID string) (*TextRespon
 	}, nil
 }
 
-func (m *MockAPIClient) SubmitRun(ctx context.Context, run *RunResult) error {
+func (m *MockAPIClient) SubmitRun(ctx context.Context, run *RunResult) (*RunSubmitResult, error) {
 	// Просто логируем, что результат отправлен
-	log.Printf("📤 Mock: отправка результата в Python API: WPM=%.2f, Accuracy=%.2f", run.WPM, run.Accuracy)
-	return nil
+	log.Printf("📤 Mock: отправка результата в Python API: WPM=%.2f, Accuracy=%.2f", run.WPMNet, run.Accuracy)
+	return &RunSubmitResult{
+		RunID:          "mock-run-id",
+		IsPersonalBest: false,
+		Flagged:        false,
+	}, nil
 }
